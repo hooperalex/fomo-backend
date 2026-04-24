@@ -171,23 +171,38 @@ module.exports = async function handler(req, res) {
       const description = stripHtml(detail.description).slice(0, 2000);
       const sku = variant.variantSku || detail.productSku;
 
+      const titleWords = (detail.productNameEn || '').toLowerCase()
+        .split(/\W+/).filter(w => w.length > 3 && w.length < 20);
+      const categoryTag = (detail.categoryName || '').toLowerCase().replace(/\s+/g, '_');
+      const tags = [...new Set([categoryTag, category, ...titleWords.slice(0, 8)])].filter(Boolean);
+
+      const rating = parseFloat(detail.productEvaluation || detail.rating || 0) || null;
+      const ratingCount = parseInt(detail.evaluationCount || detail.ratingCount || 0) || null;
+      const warehouseLocation = detail.warehouseCountry || detail.warehouseCode || null;
+      const cjCategoryId = String(detail.categoryId || '').trim() || null;
+
       try {
         const { rows } = await sql`
           INSERT INTO products (
             title, description, brand, category, subcategory,
-            tags, condition, images, sku, retail_price, floor_price
+            tags, condition, images, sku, retail_price, floor_price,
+            rating, rating_count, warehouse_location, cj_category_id
           ) VALUES (
             ${detail.productNameEn.slice(0, 255)},
             ${description || null},
             ${null},
             ${category},
             ${detail.categoryName || null},
-            ${[]},
+            ${tags},
             'new',
             ${images},
             ${sku},
             ${Math.round(retailPrice * 100) / 100},
-            ${Math.round(floorPrice * 100) / 100}
+            ${Math.round(floorPrice * 100) / 100},
+            ${rating},
+            ${ratingCount},
+            ${warehouseLocation},
+            ${cjCategoryId}
           )
           ON CONFLICT (sku) DO NOTHING
           RETURNING id, title, sku, retail_price, floor_price, category

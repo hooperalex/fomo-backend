@@ -50,10 +50,9 @@ module.exports = async function handler(req, res) {
   const userEmail = email || payload.email || null;
 
   try {
-    // Ensure apple_user_id column exists (idempotent)
-    await sql`
-      ALTER TABLE users ADD COLUMN IF NOT EXISTS apple_user_id TEXT UNIQUE
-    `;
+    // Ensure schema supports Apple sign-in (idempotent)
+    await sql`ALTER TABLE users ADD COLUMN IF NOT EXISTS apple_user_id TEXT UNIQUE`;
+    await sql`ALTER TABLE users ALTER COLUMN password_hash DROP NOT NULL`;
 
     // Find or create user by apple_user_id
     let { rows } = await sql`

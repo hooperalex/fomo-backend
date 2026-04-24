@@ -3,5 +3,8 @@
   "routes": [
     { "src": "/", "dest": "/api/health.js" },
     { "src": "/api/(.*)", "dest": "/api/$1" }
+  ],
+  "crons": [
+    { "path": "/api/cron/replenish-auctions", "schedule": "*/30 * * * *" }
   ]
 }
