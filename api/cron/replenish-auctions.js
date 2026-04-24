@@ -183,12 +183,7 @@ async function batchImportFromCJ(email, apiKey, targetCount) {
   return { imported, keyword };
 }
 
-// Auction durations staggered so they don't all expire simultaneously
-const DURATIONS_HOURS = [12, 14, 16, 18, 20, 22, 24];
-
-function pickDuration(index) {
-  return DURATIONS_HOURS[index % DURATIONS_HOURS.length] * 3600;
-}
+const AUCTION_DURATION_SECONDS = 30;
 
 // POST /api/cron/replenish-auctions (called by Vercel cron, secured by CRON_SECRET)
 module.exports = async function handler(req, res) {
@@ -265,9 +260,8 @@ module.exports = async function handler(req, res) {
         const retailPrice = parseFloat(p.retail_price);
         const floorPrice = parseFloat(p.floor_price);
         const startPrice = Math.round(retailPrice * 0.85 * 100) / 100;
-        const durationSeconds = pickDuration(report.activeAuctions + i);
-        // Stagger start times slightly so not all start at the exact same moment
-        const staggerMinutes = i * 2;
+        // Stagger start times: first auction starts in 5s, each subsequent 35s later (30s + 5s gap)
+        const staggerSeconds = i * 35;
 
         await sql`
           INSERT INTO auctions (
@@ -277,11 +271,11 @@ module.exports = async function handler(req, res) {
             ${p.id},
             ${startPrice},
             ${floorPrice},
-            ${durationSeconds},
-            300,
-            'live',
-            NOW() + ${`${staggerMinutes} minutes`}::interval,
-            NOW() + ${`${staggerMinutes} minutes`}::interval + ${`${durationSeconds} seconds`}::interval,
+            ${AUCTION_DURATION_SECONDS},
+            3,
+            'scheduled',
+            NOW() + ${`${staggerSeconds + 5} seconds`}::interval,
+            NOW() + ${`${staggerSeconds + 5 + AUCTION_DURATION_SECONDS} seconds`}::interval,
             NOW(),
             NOW()
           )
