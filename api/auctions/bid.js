@@ -6,13 +6,8 @@ const { currentPrice, auctionStatus } = require('../../lib/auction');
 // POST /api/auctions/bid
 // Body: { auctionId, amount, idempotencyKey, selectedSize? }
 //
-// Spec rules (03-auction-mechanics, 04-credit-economy, 16-realtime-bidding):
-// - Server-authoritative state; reject if auction not live
-// - First valid actor=human bid at or above currentPrice wins
-// - Idempotent by idempotencyKey — repeated submissions return prior outcome
-// - Reserve credits before accepting; capture on win (via separate flow)
-// - Agents never win; winner must have actor=human
-// - One active reserve per user per auction
+// Spec: server-authoritative auction state. No credit reserve/capture — payment
+// is collected post-win via Apple Pay through /api/orders/checkout.
 
 module.exports = async function handler(req, res) {
   setCors(res);
@@ -105,23 +100,7 @@ module.exports = async function handler(req, res) {
       });
     }
 
-    // Check credit balance — derived from ledger
-    const balanceResult = await sql`
-      SELECT
-        COALESCE(SUM(CASE WHEN type IN ('topup','bonus','refund','subscription_issue') THEN amount ELSE 0 END), 0)
-        - COALESCE(SUM(CASE WHEN type IN ('reserve','capture') THEN amount ELSE 0 END), 0)
-        + COALESCE(SUM(CASE WHEN type IN ('release') THEN amount ELSE 0 END), 0)
-        AS available
-      FROM credit_transactions
-      WHERE user_id = ${user_id} AND status = 'posted'
-        AND (expires_at IS NULL OR expires_at > NOW())
-    `;
-    const available = parseFloat(balanceResult.rows[0]?.available || 0);
-    if (available < bidAmount) {
-      return res.status(422).json({ error: 'Insufficient credits', available, required: bidAmount });
-    }
-
-    // Check for concurrent reserve on this auction
+    // Check for concurrent pending bid on this auction
     const concurrentCheck = await sql`
       SELECT id FROM bids
       WHERE user_id = ${user_id} AND auction_id = ${auctionId}
@@ -131,24 +110,13 @@ module.exports = async function handler(req, res) {
       return res.status(409).json({ error: 'concurrent_bid_in_flight' });
     }
 
-    // Reserve credits (debit from available)
-    await sql`
-      INSERT INTO credit_transactions (user_id, type, amount, source_id, auction_id, memo)
-      VALUES (${user_id}, 'reserve', ${-bidAmount}, ${idempotencyKey}, ${auctionId}, 'Bid reserve')
-    `;
-
-    // Re-check auction still live (re-fetch to race-guard)
+    // Re-check auction still live before accepting
     const freshAuction = await sql`
       SELECT status, starts_at, ends_at, winning_bid_id FROM auctions WHERE id = ${auctionId}
     `;
     const freshStatus = auctionStatus(freshAuction.rows[0]);
 
     if (freshStatus !== 'live') {
-      // Release reserve — auction closed between our check and now
-      await sql`
-        INSERT INTO credit_transactions (user_id, type, amount, source_id, auction_id, memo)
-        VALUES (${user_id}, 'release', ${bidAmount}, ${idempotencyKey}, ${auctionId}, 'Release — auction closed')
-      `;
       return res.status(422).json({ error: 'Auction closed', code: 'bid_too_late' });
     }
 
@@ -159,30 +127,19 @@ module.exports = async function handler(req, res) {
       RETURNING id, status, amount, created_at
     `;
 
-    // Mark auction as winning_hold and record winning bid
+    // Mark auction as winning_hold
     await sql`
       UPDATE auctions SET status = 'winning_hold', winning_bid_id = ${bidRow.id}, updated_at = NOW()
       WHERE id = ${auctionId} AND status = 'live'
     `;
 
-    // Expire all other pending bids on this auction and release their reserves
-    const otherBids = await sql`
+    // Expire all other pending bids on this auction
+    await sql`
       UPDATE bids SET status = 'expired'
       WHERE auction_id = ${auctionId} AND id != ${bidRow.id} AND status = 'pending' AND actor = 'human'
-      RETURNING id, user_id, amount, idempotency_key
     `;
-    for (const loser of otherBids.rows) {
-      await sql`
-        INSERT INTO credit_transactions (user_id, type, amount, source_id, auction_id, memo)
-        VALUES (${loser.user_id}, 'release', ${loser.amount}, ${loser.idempotency_key}, ${auctionId}, 'Release — outbid')
-      `;
-    }
 
-    // Capture winning credits and mark auction sold
-    await sql`
-      INSERT INTO credit_transactions (user_id, type, amount, source_id, auction_id, memo)
-      VALUES (${user_id}, 'capture', ${-bidAmount}, ${idempotencyKey}, ${auctionId}, 'Auction win capture')
-    `;
+    // Mark auction sold
     await sql`
       UPDATE auctions SET status = 'sold', updated_at = NOW()
       WHERE id = ${auctionId} AND status = 'winning_hold'
